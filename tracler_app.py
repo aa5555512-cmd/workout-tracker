@@ -51,7 +51,7 @@ def save_data(df, worksheet_name):
   """覆寫指定工作表資料（若不存在則自動新增分頁）"""
   try:
     ws = sh.worksheet(worksheet_name)
-  except gspread.WorksheetNotFound:
+  except Exception:
     ws = sh.add_worksheet(title=worksheet_name, rows=100, cols=20)
 
   ws.clear()
