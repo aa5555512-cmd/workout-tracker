@@ -18,7 +18,7 @@ SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1sdvmR4ou6AyWFBtckO8jt
 
 
 @st.cache_resource
-def get_spreadsheet():
+def get_gc_client():
   scopes = [
       "https://www.googleapis.com/auth/spreadsheets",
       "https://www.googleapis.com/auth/drive",
@@ -29,22 +29,32 @@ def get_spreadsheet():
       creds_dict["private_key"] = creds_dict["private_key"].replace(
           "\\n", "\n"
       )
-    gc = gspread.service_account_from_dict(creds_dict, scopes=scopes)
-  else:
-    gc = gspread.service_account(filename="credentials.json", scopes=scopes)
-  return gc.open_by_url(SPREADSHEET_URL)
+    return gspread.service_account_from_dict(creds_dict, scopes=scopes)
+  return gspread.service_account(filename="credentials.json", scopes=scopes)
 
 
-sh = get_spreadsheet()
-
-
-# 核心優化：加上 ttl 快取，15 秒內同一個分頁只打 1 次 Google API，徹底解決 429 限制！
-@st.cache_data(ttl=15, show_spinner=False)
-def load_data(worksheet_name):
-  """穩健讀取工作表資料，支援自動重試與快取"""
-  for attempt in range(3):
+def get_worksheet_with_retry(worksheet_name):
+  gc = get_gc_client()
+  for attempt in range(4):
     try:
-      ws = sh.worksheet(worksheet_name)
+      sh = gc.open_by_url(SPREADSHEET_URL)
+      try:
+        return sh.worksheet(worksheet_name)
+      except Exception:
+        return sh.add_worksheet(title=worksheet_name, rows=100, cols=20)
+    except Exception as e:
+      if "429" in str(e) and attempt < 3:
+        time.sleep(3 * (attempt + 1))
+        continue
+      raise e
+
+
+# 拉長快取時間至 10 分鐘 (600秒)，平常操作完全不消耗任何 API 配額！
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_worksheet_df(worksheet_name):
+  for attempt in range(4):
+    try:
+      ws = get_worksheet_with_retry(worksheet_name)
       data = ws.get_all_values()
       if not data or len(data) <= 1:
         return pd.DataFrame()
@@ -53,40 +63,59 @@ def load_data(worksheet_name):
       df = pd.DataFrame(rows, columns=header)
       return df.dropna(how="all")
     except Exception as e:
-      if "429" in str(e) and attempt < 2:
-        time.sleep(1.5 * (attempt + 1))
+      if "429" in str(e) and attempt < 3:
+        time.sleep(3 * (attempt + 1))
         continue
       st.sidebar.error(f"讀取 {worksheet_name} 失敗: {e}")
       return pd.DataFrame()
   return pd.DataFrame()
 
 
-def save_data(df, worksheet_name):
-  """覆寫指定工作表資料，並在完成後立即清除快取"""
-  for attempt in range(3):
+def append_single_log(new_row_dict):
+  """新增單筆訓練紀錄時，改用 append_row，速度快且不需覆寫整個工作表"""
+  for attempt in range(4):
     try:
-      try:
-        ws = sh.worksheet(worksheet_name)
-      except Exception:
-        ws = sh.add_worksheet(title=worksheet_name, rows=100, cols=20)
+      ws = get_worksheet_with_retry("workout_logs")
+      row_values = [
+          new_row_dict.get("student_name", ""),
+          new_row_dict.get("log_date", ""),
+          new_row_dict.get("exercise_name", ""),
+          new_row_dict.get("set_num", 1),
+          new_row_dict.get("weight", 0.0),
+          new_row_dict.get("reps", 1),
+          new_row_dict.get("note", ""),
+      ]
+      ws.append_row(row_values)
+      fetch_worksheet_df.clear()
+      break
+    except Exception as e:
+      if "429" in str(e) and attempt < 3:
+        time.sleep(3 * (attempt + 1))
+        continue
+      st.error(f"新增組數失敗: {e}")
+      break
 
+
+def save_full_dataframe(df, worksheet_name):
+  for attempt in range(4):
+    try:
+      ws = get_worksheet_with_retry(worksheet_name)
       ws.clear()
       if not df.empty:
         values = [df.columns.values.tolist()] + df.values.tolist()
         ws.update(range_name="A1", values=values)
-      # 寫入成功後，清除快取確保下次讀取為最新版
-      load_data.clear()
+      fetch_worksheet_df.clear()
       break
     except Exception as e:
-      if "429" in str(e) and attempt < 2:
-        time.sleep(2 * (attempt + 1))
+      if "429" in str(e) and attempt < 3:
+        time.sleep(3 * (attempt + 1))
         continue
       st.error(f"寫入 {worksheet_name} 失敗: {e}")
       break
 
 
-# 初始化基本動作庫（若為空才寫入）
-exercises_df = load_data("exercises")
+# 讀取動作清單
+exercises_df = fetch_worksheet_df("exercises")
 if exercises_df.empty or "name" not in exercises_df.columns:
   default_exercises = pd.DataFrame([
       {"name": "槓鈴臥推", "category": "上肢"},
@@ -94,11 +123,11 @@ if exercises_df.empty or "name" not in exercises_df.columns:
       {"name": "啞鈴肩推", "category": "上肢"},
       {"name": "滑輪下拉", "category": "上肢"},
       {"name": "槓鈴深蹲", "category": "下肢"},
-      {"name": "槓鈴硬舉", "category": "下肢"},
+      {"name": "相撲硬舉", "category": "下肢"},
       {"name": "保加利亞分腿蹲", "category": "下肢"},
       {"name": "羅馬尼亞硬舉", "category": "下肢"},
   ])
-  save_data(default_exercises, "exercises")
+  save_full_dataframe(default_exercises, "exercises")
   exercises_df = default_exercises
 
 # ------------------------------------------------------------------------------
@@ -106,12 +135,11 @@ if exercises_df.empty or "name" not in exercises_df.columns:
 # ------------------------------------------------------------------------------
 st.sidebar.title("👥 學生管理")
 
-# 側邊欄手動重整按鈕
 if st.sidebar.button("🔄 同步 Google Sheets 最新資料", use_container_width=True):
-  load_data.clear()
+  fetch_worksheet_df.clear()
   st.rerun()
 
-students_df = load_data("students")
+students_df = fetch_worksheet_df("students")
 student_list = []
 
 name_col = None
@@ -148,7 +176,7 @@ with st.sidebar.expander("➕ 新增學生姓名"):
           )
         else:
           updated_students = new_row
-        save_data(updated_students, "students")
+        save_full_dataframe(updated_students, "students")
         st.sidebar.success(f"已成功新增：{name_clean}")
         st.rerun()
     else:
@@ -171,7 +199,7 @@ with st.sidebar.expander("🏋 新增動作項目"):
         updated_exercises = pd.concat(
             [exercises_df, new_ex_row], ignore_index=True
         )
-        save_data(updated_exercises, "exercises")
+        save_full_dataframe(updated_exercises, "exercises")
         st.sidebar.success(f"已成功新增：{ex_clean}")
         st.rerun()
     else:
@@ -186,14 +214,14 @@ if not student_list:
 selected_student = st.sidebar.radio("選擇要記錄的學生：", student_list)
 
 # ------------------------------------------------------------------------------
-# 3. 主畫面：選定學生的訓練紀錄、歷史日誌與 1RM 追蹤
+# 3. 主畫面
 # ------------------------------------------------------------------------------
 head_col1, head_col2 = st.columns([3, 1])
 with head_col1:
   st.title(f"📋 {selected_student} 的訓練日誌")
 with head_col2:
   if st.button("🔄 同步刷新", key="top_refresh_btn", use_container_width=True):
-    load_data.clear()
+    fetch_worksheet_df.clear()
     st.rerun()
 
 tab1, tab2, tab3 = st.tabs(
@@ -206,8 +234,7 @@ exercise_options = (
     else []
 )
 
-# 一次性讀取全體 workout_logs，避免在每個 Tab 重複向 Google 發送請求
-all_logs = load_data("workout_logs")
+all_logs = fetch_worksheet_df("workout_logs")
 s_col = (
     "student_name"
     if "student_name" in all_logs.columns
@@ -228,7 +255,6 @@ with tab1:
   date_str = str(training_date)
   st.subheader(f"記錄 {date_str} 的動作組數")
 
-  # Session State 初始化
   if "current_ex" not in st.session_state:
     st.session_state["current_ex"] = (
         exercise_options[0] if exercise_options else ""
@@ -258,7 +284,6 @@ with tab1:
 
   active_ex = st.session_state["current_ex"]
 
-  # 表單輸入
   with st.form("set_form", clear_on_submit=False):
     c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
     with c1:
@@ -293,7 +318,7 @@ with tab1:
     )
 
     if submitted:
-      new_log = pd.DataFrame([{
+      new_log_dict = {
           "student_name": selected_student,
           "log_date": date_str,
           "exercise_name": active_ex,
@@ -301,9 +326,8 @@ with tab1:
           "weight": float(weight),
           "reps": int(reps),
           "note": str(note) if note else "",
-      }])
-      updated_logs = pd.concat([all_logs, new_log], ignore_index=True)
-      save_data(updated_logs, "workout_logs")
+      }
+      append_single_log(new_log_dict)
 
       st.session_state["current_set"] = set_num + 1
       st.session_state["last_weight"] = weight
@@ -383,7 +407,7 @@ with tab1:
       clean_edited["note"] = clean_edited["note"].fillna("").astype(str)
 
       final_logs = pd.concat([other_logs, clean_edited], ignore_index=True)
-      save_data(final_logs, "workout_logs")
+      save_full_dataframe(final_logs, "workout_logs")
       st.success("Google Sheets 今日組數已成功更新！")
       st.rerun()
   else:
@@ -454,7 +478,6 @@ with tab3:
       "💡 推估公式採用 Epley 公式：`重量 × (1 + 次數 / 30)`，次數為 1 時即為實測 1RM。"
   )
 
-  # 嚴格精準比對這三個動作
   target_exercises = ["槓鈴深蹲", "相撲硬舉", "槓鈴臥推"]
 
   if not student_logs.empty and "exercise_name" in student_logs.columns:
@@ -504,7 +527,6 @@ with tab3:
     st.divider()
 
     st.subheader("📊 1RM 進步趨勢長條圖")
-    # 將資料轉為長表，並使用 stack=False 讓同天不同動作並排分開，不再疊在一起
     st.bar_chart(
         data=daily_max_df,
         x="log_date",
