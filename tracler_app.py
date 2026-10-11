@@ -454,7 +454,8 @@ with tab3:
       "💡 推估公式採用 Epley 公式：`重量 × (1 + 次數 / 30)`，次數為 1 時即為實測 1RM。"
   )
 
-  target_exercises = ["槓鈴深蹲", "槓鈴硬舉", "槓鈴臥推"]
+  # 嚴格精準比對這三個動作
+  target_exercises = ["槓鈴深蹲", "相撲硬舉", "槓鈴臥推"]
 
   if not student_logs.empty and "exercise_name" in student_logs.columns:
     sbd_logs = student_logs[
@@ -479,7 +480,7 @@ with tab3:
     col_sq, col_dl, col_bp = st.columns(3)
     cards = [
         ("槓鈴深蹲", col_sq, "🏋️ 深蹲 PR"),
-        ("槓鈴硬舉", col_dl, "⚡ 硬舉 PR"),
+        ("相撲硬舉", col_dl, "⚡ 相撲硬舉 PR"),
         ("槓鈴臥推", col_bp, "💪 臥推 PR"),
     ]
 
@@ -529,5 +530,5 @@ with tab3:
     st.dataframe(display_sbd, use_container_width=True)
   else:
     st.info(
-        "目前尚未記錄到任何「槓鈴深蹲」、「槓鈴硬舉」或「槓鈴臥推」的組數資料。"
+        "目前尚未記錄到任何「槓鈴深蹲」、「相撲硬舉」或「槓鈴臥推」的組數資料。"
     )
