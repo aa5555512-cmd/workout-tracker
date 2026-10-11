@@ -504,11 +504,14 @@ with tab3:
     st.divider()
 
     st.subheader("📊 1RM 進步趨勢長條圖")
-    pivot_chart = daily_max_df.pivot(
-        index="log_date", columns="exercise_name", values="e1RM"
+    # 將資料轉為長表，並使用 stack=False 讓同天不同動作並排分開，不再疊在一起
+    st.bar_chart(
+        data=daily_max_df,
+        x="log_date",
+        y="e1RM",
+        color="exercise_name",
+        stack=False,
     )
-    # 改為使用長條圖顯示
-    st.bar_chart(pivot_chart)
 
     st.subheader("📋 三項訓練課最高表現紀錄明細")
     display_sbd = daily_max_df.rename(
