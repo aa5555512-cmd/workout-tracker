@@ -22,16 +22,18 @@ def get_spreadsheet():
       "https://www.googleapis.com/auth/spreadsheets",
       "https://www.googleapis.com/auth/drive",
   ]
-  # 優先讀取 Streamlit Secrets (雲端環境)，若無則讀取本地 credentials.json
+  # 優先讀取 Streamlit Secrets (雲端環境)，若無則讀取本機 credentials.json
   if "gcp_service_account" in st.secrets:
     creds_dict = dict(st.secrets["gcp_service_account"])
+    # 修正 TOML 多行字串可能遺失 \n 的問題
+    if "\\n" in creds_dict["private_key"]:
+      creds_dict["private_key"] = creds_dict["private_key"].replace(
+          "\\n", "\n"
+      )
     gc = gspread.service_account_from_dict(creds_dict, scopes=scopes)
   else:
     gc = gspread.service_account(filename="credentials.json", scopes=scopes)
   return gc.open_by_url(SPREADSHEET_URL)
-
-
-sh = get_spreadsheet()
 
 
 def load_data(worksheet_name):
