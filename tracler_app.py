@@ -503,11 +503,12 @@ with tab3:
 
     st.divider()
 
-    st.subheader("📈 1RM 進步趨勢曲線")
+    st.subheader("📊 1RM 進步趨勢長條圖")
     pivot_chart = daily_max_df.pivot(
         index="log_date", columns="exercise_name", values="e1RM"
     )
-    st.line_chart(pivot_chart)
+    # 改為使用長條圖顯示
+    st.bar_chart(pivot_chart)
 
     st.subheader("📋 三項訓練課最高表現紀錄明細")
     display_sbd = daily_max_df.rename(
