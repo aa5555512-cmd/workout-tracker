@@ -44,7 +44,6 @@ def get_ws(name):
     return sh.add_worksheet(title=name, rows=100, cols=20)
 
 
-# 快取 10 分鐘，不卡住線程
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_worksheet_df(worksheet_name):
   try:
@@ -112,7 +111,7 @@ if exercises_df.empty or "name" not in exercises_df.columns:
   exercises_df = default_exercises
 
 # ------------------------------------------------------------------------------
-# 2. 側邊欄：學生列表選擇與名單擴充
+# 2. 側邊欄：學生列表選擇與記憶機制
 # ------------------------------------------------------------------------------
 st.sidebar.title("👥 學生管理")
 
@@ -193,7 +192,26 @@ if not student_list:
   )
   st.stop()
 
-selected_student = st.sidebar.radio("選擇要記錄的學生：", student_list)
+# 關鍵優化 1：從 URL 讀取上次記憶的學生
+query_student = st.query_params.get("student", None)
+default_student_idx = 0
+if query_student and query_student in student_list:
+  default_student_idx = student_list.index(query_student)
+
+
+def on_student_change():
+  st.query_params["student"] = st.session_state["student_radio"]
+
+
+selected_student = st.sidebar.radio(
+    "選擇要記錄的學生：",
+    student_list,
+    index=default_student_idx,
+    key="student_radio",
+    on_change=on_student_change,
+)
+# 確保 URL 隨時有最新的學生參數
+st.query_params["student"] = selected_student
 
 # ------------------------------------------------------------------------------
 # 3. 主畫面
@@ -211,7 +229,7 @@ tab1, tab2, tab3 = st.tabs(
     ["✍️ 記錄當日訓練", "📊 歷史單日彙總", "🏆 三項 1RM 進步追蹤"]
 )
 
-# 動作自動分類排序邏輯
+# 動作自動分類排序
 raw_exercises = (
     exercises_df["name"].dropna().astype(str).unique().tolist()
     if "name" in exercises_df.columns
@@ -220,22 +238,16 @@ raw_exercises = (
 
 
 def get_exercise_sort_key(ex_name):
-  # 1: 胸部推 (臥推/握推/夾胸/伏地挺身)
   if any(k in ex_name for k in ["臥推", "握推", "夾胸", "伏地挺身"]):
     return (1, ex_name)
-  # 2: 深蹲 (深蹲/腿推/分腿蹲/跨步蹲)
   elif any(k in ex_name for k in ["深蹲", "腿推", "分腿蹲", "跨步蹲"]):
     return (2, ex_name)
-  # 3: 硬舉 (硬舉/早安/臀推)
   elif any(k in ex_name for k in ["硬舉", "早安", "臀推"]):
     return (3, ex_name)
-  # 4: 肩推 (肩推/過頂推/側平舉/平舉)
   elif any(k in ex_name for k in ["肩推", "過頂推", "側平舉", "平舉"]):
     return (4, ex_name)
-  # 5: 背部拉 (划船/下拉/引體向上/滑輪拉)
   elif any(k in ex_name for k in ["划船", "下拉", "引體向上", "滑輪拉"]):
     return (5, ex_name)
-  # 6: 其他未歸類項目
   else:
     return (6, ex_name)
 
@@ -263,51 +275,63 @@ with tab1:
   date_str = str(training_date)
   st.subheader(f"記錄 {date_str} 的動作組數")
 
-  if "current_ex" not in st.session_state:
-    st.session_state["current_ex"] = (
-        exercise_options[0] if exercise_options else ""
-    )
-  if "current_set" not in st.session_state:
-    st.session_state["current_set"] = 1
-  if "last_weight" not in st.session_state:
-    st.session_state["last_weight"] = 60.0
-  if "last_reps" not in st.session_state:
-    st.session_state["last_reps"] = 8
+  # 關鍵優化 2：從 URL 讀取上次記憶的動作
+  query_exercise = st.query_params.get("exercise", None)
+  default_ex_idx = 0
+  if query_exercise and query_exercise in exercise_options:
+    default_ex_idx = exercise_options.index(query_exercise)
 
   def on_exercise_change():
-    st.session_state["current_ex"] = st.session_state["select_ex_box"]
-    st.session_state["current_set"] = 1
+    st.query_params["exercise"] = st.session_state["select_ex_box"]
 
-  current_idx = 0
-  if st.session_state["current_ex"] in exercise_options:
-    current_idx = exercise_options.index(st.session_state["current_ex"])
-
-  st.selectbox(
-      "選擇訓練動作（切換動作時組數將自動歸 1）",
+  active_ex = st.selectbox(
+      "選擇訓練動作",
       exercise_options,
-      index=current_idx,
+      index=default_ex_idx,
       key="select_ex_box",
       on_change=on_exercise_change,
   )
+  st.query_params["exercise"] = active_ex
 
-  active_ex = st.session_state["current_ex"]
+  # 關鍵優化 3：自動計算「當天已完成的組數」，斷線重整也能自動銜接下一組！
+  auto_next_set = 1
+  auto_weight = 60.0
+  auto_reps = 8
 
+  if not all_logs.empty and s_col and d_col:
+    ex_col = (
+        "exercise_name"
+        if "exercise_name" in all_logs.columns
+        else ("動作名稱" if "動作名稱" in all_logs.columns else None)
+    )
+    if ex_col:
+      ex_history = all_logs[
+          (all_logs[s_col].astype(str) == selected_student)
+          & (all_logs[d_col].astype(str) == date_str)
+          & (all_logs[ex_col].astype(str) == active_ex)
+      ]
+      if not ex_history.empty:
+        auto_next_set = len(ex_history) + 1
+        last_row = ex_history.iloc[-1]
+        try:
+          auto_weight = float(last_row.get("weight", 60.0))
+          auto_reps = int(last_row.get("reps", 8))
+        except Exception:
+          pass
+
+  # 表單輸入
   with st.form("set_form", clear_on_submit=False):
     c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
     with c1:
       set_num = st.number_input(
-          "第幾組 (Set)",
-          min_value=1,
-          max_value=30,
-          value=st.session_state["current_set"],
-          step=1,
+          "第幾組 (Set)", min_value=1, max_value=30, value=auto_next_set, step=1
       )
     with c2:
       weight = st.number_input(
           "重量 (kg)",
           min_value=0.0,
           max_value=500.0,
-          value=float(st.session_state["last_weight"]),
+          value=float(auto_weight),
           step=0.5,
       )
     with c3:
@@ -315,7 +339,7 @@ with tab1:
           "次數 (Reps)",
           min_value=1,
           max_value=100,
-          value=int(st.session_state["last_reps"]),
+          value=int(auto_reps),
           step=1,
       )
     with c4:
@@ -337,9 +361,6 @@ with tab1:
       }
       success = append_single_log(new_log_dict)
       if success:
-        st.session_state["current_set"] = set_num + 1
-        st.session_state["last_weight"] = weight
-        st.session_state["last_reps"] = reps
         st.success(
             f"已成功儲存：{active_ex} 第 {set_num} 組 - {weight} kg x {reps} 次"
         )
@@ -524,7 +545,7 @@ with tab3:
               label=label_text,
               value=f"{best_1rm} kg",
               help=(
-                  f"於 {best_row['log_date']} 達成 ({best_row['weight']}kg x"
+                  f"於 {best_row['log_date']}達成 ({best_row['weight']}kg x"
                   f" {best_row['reps']}下)"
               ),
           )
